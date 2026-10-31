@@ -14,11 +14,12 @@ def store_candidate(db, user_id, raw, plan):
     external = raw['external_id']
     if len(external) > 255:
         external = external[:60] + ':' + hashlib.sha256(external.encode()).hexdigest()
+    # Only exact identities merge here. Title/company/location fingerprints are a soft
+    # signal (reconcile_identity) - two openings with the same title at the same office
+    # are common and must stay separate rows.
     conditions = [Job.external_id == external]
     if url:
         conditions.append(Job.canonical_url == url)
-    if fp:
-        conditions.append(Job.fingerprint == fp)
     job = db.scalar(select(Job).where(Job.user_id == user_id, or_(*conditions)))
     created = job is None
     body = html_to_text(raw.get('description')) or raw.get('title') or ''
@@ -66,20 +67,28 @@ def store_candidate(db, user_id, raw, plan):
     return job, created
 
 
+def _same_listing_source(a, b):
+    """Two postings from the same source with different source IDs are different openings,
+    even when title, company and location match."""
+    source_a, source_b = (a.research or {}).get('source'), (b.research or {}).get('source')
+    return bool(source_a) and source_a == source_b and a.external_id != b.external_id
+
+
 def reconcile_identity(db, job):
     """Mark enriched cross-source duplicates without deleting IDs or application history."""
-    conditions = []
-    if job.canonical_url:
-        conditions.append(Job.canonical_url == job.canonical_url)
-    if job.fingerprint:
-        conditions.append(Job.fingerprint == job.fingerprint)
-    if not conditions:
-        return
-    db.flush()
-    original = db.scalar(select(Job).where(Job.user_id == job.user_id, or_(*conditions)).order_by(Job.created_at, Job.id))
     data = dict(job.research or {})
-    if original and original.id != job.id:
+    data.pop('duplicate_of', None)
+    original = None
+    if job.canonical_url:
+        original = db.scalar(select(Job).where(Job.user_id == job.user_id, Job.id != job.id,
+                                               Job.canonical_url == job.canonical_url).order_by(Job.created_at, Job.id))
+    if original is None and job.fingerprint:
+        db.flush()
+        for other in db.scalars(select(Job).where(Job.user_id == job.user_id, Job.id != job.id,
+                                                  Job.fingerprint == job.fingerprint).order_by(Job.created_at, Job.id)):
+            if not _same_listing_source(job, other):
+                original = other
+                break
+    if original is not None and (original.created_at, str(original.id)) < (job.created_at, str(job.id)):
         data['duplicate_of'] = str(original.id)
-    else:
-        data.pop('duplicate_of', None)
     job.research = data

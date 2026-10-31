@@ -314,6 +314,10 @@ def execute_run(db, run):
                     run.status = 'success'
             run.finished_at = datetime.now(timezone.utc)
             db.commit()
+            if run.status in ('failed', 'partial'):
+                failed = [f"{r['source']}: {r['error']}"[:200] for r in results if r.get('error')]
+                logging.getLogger(__name__).warning('Discovery run %s finished %s; %d source error(s): %s',
+                                                    run.id, run.status, len(failed), '; '.join(failed[:5]))
         except Exception as exc:
             db.rollback()
             logging.getLogger(__name__).exception('Discovery run failed')

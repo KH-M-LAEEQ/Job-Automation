@@ -7,10 +7,14 @@ from sqlalchemy.orm import Session
 from app.core.crypto import encrypt_secret
 from app.models.email_account import EmailAccount
 from app.schemas.email_account import EmailAccountCreate, EmailTestResult
-from app.services.email_service import EmailSendError, send_email
+from app.services.email_service import EmailSendError, send_email, validate_smtp_server
 
 
 class EmailAccountNotFoundError(Exception):
+    pass
+
+
+class InvalidEmailAccountError(Exception):
     pass
 
 
@@ -19,6 +23,10 @@ def get_email_account(db: Session, user_id: uuid.UUID) -> EmailAccount | None:
 
 
 def upsert_email_account(db: Session, user_id: uuid.UUID, data: EmailAccountCreate) -> EmailAccount:
+    try:
+        validate_smtp_server(data.smtp_host, data.smtp_port)
+    except ValueError as e:
+        raise InvalidEmailAccountError(str(e)) from e
     account = get_email_account(db, user_id)
     encrypted_password = encrypt_secret(data.smtp_password)
 

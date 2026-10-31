@@ -1,3 +1,4 @@
+import json
 import re
 
 from app.ai.client import generate_text
@@ -60,6 +61,18 @@ def generate_resume_bullets(profile: ResumeProfile, job: JobExtraction) -> list[
     return bullets
 
 
+def _followup_context(profile: ResumeProfile, job: JobExtraction) -> str:
+    """Only what a short status-check email needs - the email leaves the user's mailbox,
+    so links, location, preferences and full experience details are not given to the model."""
+    candidate = {
+        "summary": profile.summary,
+        "skills": profile.skills[:12],
+        "recent_roles": [{"title": e.title, "company": e.company} for e in profile.experience[:3]],
+    }
+    role = {"title": job.title, "company": job.company, "requirements": (job.requirements or [])[:8]}
+    return f"CANDIDATE:\n{json.dumps(candidate, indent=2)}\n\nJOB:\n{json.dumps(role, indent=2)}"
+
+
 def generate_followup_email(
     profile: ResumeProfile, job: JobExtraction, days_since_applied: int, attempt_number: int
 ) -> tuple[str, str]:
@@ -70,7 +83,7 @@ def generate_followup_email(
         model=settings.generation_model,
         system=FOLLOWUP_EMAIL_SYSTEM_PROMPT,
         user_content=(
-            f"{_context(profile, job)}\n\n"
+            f"{_followup_context(profile, job)}\n\n"
             f"DAYS SINCE APPLYING: {days_since_applied}\n"
             f"FOLLOW-UP ATTEMPT NUMBER: {attempt_number}"
         ),

@@ -15,8 +15,7 @@ class SourceTests(unittest.TestCase):
         doc = Document()
         doc.add_paragraph('Project: RAG assistant using Python and FastAPI')
         doc.save(stream)
-        stream.seek(0)
-        self.assertIn('FastAPI', extract_text_from_docx(stream))
+        self.assertIn('FastAPI', extract_text_from_docx(stream.getvalue()))
 
     def test_remote_feed_keeps_geography(self):
         response = MagicMock()

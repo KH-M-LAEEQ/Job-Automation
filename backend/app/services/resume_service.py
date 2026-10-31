@@ -11,7 +11,8 @@ from app.models.resume import Resume
 from app.models.user import User
 from app.parsers.docx_parser import extract_text_from_docx
 from app.parsers.pdf_parser import extract_text_from_pdf
-from app.storage.file_storage import save_upload_file
+from app.config import get_settings
+from app.storage.file_storage import delete_stored_file, save_encrypted_file
 
 # How many of a resume's AI-suggested target roles get joined into the profile's
 # search_keywords. Matches crawl_service.MAX_ROLE_PHRASES - each role becomes a separate
@@ -24,10 +25,43 @@ class ResumeNotFoundError(Exception):
     pass
 
 
-def _extract_text(file_path: str, file_type: str) -> str:
-    if file_type == "pdf":
-        return extract_text_from_pdf(file_path)
-    return extract_text_from_docx(file_path)
+class ResumeFileError(Exception):
+    """The upload is not a readable PDF/DOCX within the size limit."""
+
+
+# A DOCX is a zip archive; refuse archives that expand to something absurd (zip bombs).
+MAX_DOCX_UNCOMPRESSED = 50 * 1024 * 1024
+
+
+def _detect_type(content: bytes, filename: str) -> str:
+    name = filename.lower()
+    if name.endswith(".pdf"):
+        if b"%PDF-" not in content[:1024]:
+            raise ResumeFileError("This file is not a valid PDF")
+        return "pdf"
+    if name.endswith(".docx"):
+        import io
+        import zipfile
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                if "word/document.xml" not in archive.namelist():
+                    raise ResumeFileError("This file is not a valid DOCX document")
+                if sum(info.file_size for info in archive.infolist()) > MAX_DOCX_UNCOMPRESSED:
+                    raise ResumeFileError("This DOCX document is too large to process")
+        except zipfile.BadZipFile as e:
+            raise ResumeFileError("This file is not a valid DOCX document") from e
+        return "docx"
+    raise ResumeFileError("Only PDF and DOCX files are supported")
+
+
+def _extract_text(content: bytes, file_type: str) -> str:
+    try:
+        text = extract_text_from_pdf(content) if file_type == "pdf" else extract_text_from_docx(content)
+    except Exception as e:
+        raise ResumeFileError("Could not read text from this file. Try exporting it again as PDF or DOCX.") from e
+    if not text.strip():
+        raise ResumeFileError("No text found in this file. Scanned images are not supported.")
+    return text
 
 
 def _apply_profile_defaults(db: Session, user_id: uuid.UUID, profile: ResumeProfile) -> None:
@@ -70,9 +104,14 @@ def _run_parse(db: Session, resume: Resume) -> Resume:
 
 
 def upload_resume(db: Session, user_id: uuid.UUID, file: UploadFile) -> Resume:
-    file_type = "pdf" if (file.filename or "").lower().endswith(".pdf") else "docx"
-    file_path = save_upload_file(file)
-    raw_text = _extract_text(file_path, file_type)
+    limit = get_settings().max_upload_mb * 1024 * 1024
+    content = file.file.read(limit + 1)
+    if len(content) > limit:
+        raise ResumeFileError(f"Files must be {get_settings().max_upload_mb} MB or smaller")
+    file_type = _detect_type(content, file.filename or "")
+    raw_text = _extract_text(content, file_type)
+    # Stored only once the file is known to be readable, so failed uploads leave nothing behind.
+    file_path = save_encrypted_file(content, "." + file_type)
 
     is_first_resume = db.scalar(select(Resume.id).where(Resume.user_id == user_id).limit(1)) is None
 
@@ -123,5 +162,7 @@ def set_primary_resume(db: Session, user_id: uuid.UUID, resume_id: uuid.UUID) ->
 
 def delete_resume(db: Session, user_id: uuid.UUID, resume_id: uuid.UUID) -> None:
     resume = get_resume(db, user_id, resume_id)
+    file_path = resume.file_path
     db.delete(resume)
     db.commit()
+    delete_stored_file(file_path)

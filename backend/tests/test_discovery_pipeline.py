@@ -1,7 +1,7 @@
 import os
 import unittest
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 os.environ.setdefault('EMAIL_ENCRYPTION_KEY', 'test-only')
@@ -26,6 +26,7 @@ from app.services.discovery_store import store_candidate
 from app.services.discovery_backlog import process_user_backlog, match_context
 from app.services.opportunity_service import send_opportunities
 from app.services.recommendation_policy import POLICY_VERSION
+from app.services import followup_service
 
 
 @compiles(JSONB, 'sqlite')
@@ -211,20 +212,58 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(job.requirements, ['Python'])
         self.assertEqual(job.research['enrichment_state'], 'completed')
 
-    def test_employer_followups_still_send_to_employer(self):
+    def _applied(self, contact='careers@example.org', profile=None, index=1):
         from app.models.application import Application
-        from app.services.followup_service import run_followups_for_user
-        resume = self.resume()
-        job, _ = store_candidate(self.db, self.user.id, self.raw(), {})
-        job.contact_email = 'careers@example.org'
-        application = Application(user_id=self.user.id, job_id=job.id, resume_id=resume.id, status='applied', applied_at=datetime.now(timezone.utc))
+        resume = self.resume() if profile is None else None
+        if resume is None:
+            resume = Resume(user_id=self.user.id, original_filename='b.pdf', file_path='b.pdf', file_type='pdf', raw_text='x', is_primary=False, parse_status='parsed', structured_profile=profile)
+            self.db.add(resume)
+        job, _ = store_candidate(self.db, self.user.id, self.raw(index), {})
+        job.contact_email = contact
+        application = Application(user_id=self.user.id, job_id=job.id, resume_id=resume.id, status='applied',
+                                  applied_at=datetime.now(timezone.utc) - timedelta(days=30))
         self.db.add(application)
         self.db.commit()
-        with patch('app.services.followup_service.get_email_account', return_value=MagicMock()), patch('app.services.followup_service._eligible_applications', return_value=[application]), patch('app.services.followup_service.generate_followup_email', return_value=('Follow up', 'Hello')), patch('app.services.followup_service.send_email') as send:
-            application.applied_at = datetime.now(timezone.utc)
-            result = run_followups_for_user(self.db, self.user)
-            self.assertEqual(result[0].status, 'sent')
-            self.assertEqual(send.call_args.args[1], 'careers@example.org')
+        return application
+
+    def _due(self, apps):
+        return lambda db, user: [a for a in apps if not followup_service.has_open_draft(a)]
+
+    def test_followups_are_drafted_never_sent_without_approval(self):
+        application = self._applied()
+        with patch.object(followup_service, 'get_email_account', return_value=MagicMock()),              patch.object(followup_service, '_eligible_applications', self._due([application])),              patch.object(followup_service, 'generate_followup_email', return_value=('Follow up', 'Hello')),              patch.object(followup_service, 'send_email') as send:
+            drafts = followup_service.draft_followups_for_user(self.db, self.user)
+            again = followup_service.draft_followups_for_user(self.db, self.user)
+            send.assert_not_called()
+        self.assertEqual([d.status for d in drafts], ['pending_approval'])
+        self.assertEqual(drafts[0].recipient, 'careers@example.org')
+        self.assertEqual(again, [])  # an open draft blocks a second one
+
+    def test_approved_followup_sends_once_to_employer(self):
+        application = self._applied()
+        with patch.object(followup_service, 'get_email_account', return_value=MagicMock()),              patch.object(followup_service, '_eligible_applications', self._due([application])),              patch.object(followup_service, 'generate_followup_email', return_value=('Follow up', 'Hello')),              patch.object(followup_service, 'send_email') as send:
+            draft = followup_service.draft_followups_for_user(self.db, self.user)[0]
+            sent = followup_service.approve_and_send(self.db, application, draft.id, subject='Edited subject')
+            with self.assertRaises(followup_service.FollowUpNotPendingError):
+                followup_service.approve_and_send(self.db, application, draft.id)
+        self.assertEqual(sent.status, 'sent')
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(send.call_args.args[1:3], ('careers@example.org', 'Edited subject'))
+
+    def test_one_bad_application_never_causes_resends(self):
+        good = self._applied(index=1)
+        bad = self._applied(profile={'skills': 'not-a-list'}, index=2)
+        with patch.object(followup_service, 'get_email_account', return_value=MagicMock()),              patch.object(followup_service, '_eligible_applications', self._due([good, bad])),              patch.object(followup_service, 'generate_followup_email', return_value=('Follow up', 'Hello')),              patch.object(followup_service, 'send_email') as send:
+            for _ in range(3):
+                followup_service.draft_followups_for_user(self.db, self.user)
+            send.assert_not_called()
+        from app.models.followup import FollowUp
+        self.assertEqual(len(list(self.db.scalars(select(FollowUp)))), 1)
+
+    def test_invalid_contact_address_gets_no_draft(self):
+        application = self._applied(contact='not an email <script>')
+        with patch.object(followup_service, 'get_email_account', return_value=MagicMock()),              patch.object(followup_service, '_eligible_applications', self._due([application])),              patch.object(followup_service, 'generate_followup_email', return_value=('Follow up', 'Hello')):
+            self.assertEqual(followup_service.draft_followups_for_user(self.db, self.user), [])
 
     def test_search_api_queue_history_cancel_and_ownership(self):
         from fastapi.testclient import TestClient
@@ -271,7 +310,7 @@ class PipelineTests(unittest.TestCase):
     def test_duplicate_after_enrichment_preserves_rows(self):
         from app.services.discovery_store import reconcile_identity
         a, _ = store_candidate(self.db, self.user.id, self.raw(1), {})
-        b, _ = store_candidate(self.db, self.user.id, self.raw(2), {})
+        b, _ = store_candidate(self.db, self.user.id, {**self.raw(2), 'source': 'other-board'}, {})
         a.fingerprint = b.fingerprint = 'same-verified-identity'
         self.db.commit()
         reconcile_identity(self.db, a)

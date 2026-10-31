@@ -1,15 +1,15 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class EmailAccountCreate(BaseModel):
-    smtp_host: str
+    smtp_host: str = Field(min_length=1, max_length=255)
     smtp_port: int = 587
-    smtp_username: str
-    smtp_password: str
-    from_name: str | None = None
+    smtp_username: str = Field(min_length=1, max_length=255)
+    smtp_password: str = Field(min_length=1, max_length=1024)
+    from_name: str | None = Field(None, max_length=255)
     from_email: EmailStr
     use_tls: bool = True
 

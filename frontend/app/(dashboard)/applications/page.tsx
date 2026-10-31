@@ -105,12 +105,21 @@ export default function ApplicationsPage() {
                               No contact email - follow-ups unavailable
                             </span>
                           ) : (
-                            <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                              Followed up {app.followup_count}
-                              {app.next_followup_due_at && !app.followup_opt_out
-                                ? ` · next ${new Date(app.next_followup_due_at).toLocaleDateString()}`
-                                : ""}
-                            </span>
+                            app.pending_followup_count > 0 ? (
+                              <Link
+                                href={`/jobs/${app.job_id}`}
+                                className="text-xs font-medium text-amber-700 hover:underline dark:text-amber-300"
+                              >
+                                Follow-up draft awaiting your approval
+                              </Link>
+                            ) : (
+                              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                                Followed up {app.followup_count}
+                                {app.next_followup_due_at && !app.followup_opt_out
+                                  ? ` · next draft ${new Date(app.next_followup_due_at).toLocaleDateString()}`
+                                  : ""}
+                              </span>
+                            )
                           )}
                           {job?.contact_email && (
                             <button

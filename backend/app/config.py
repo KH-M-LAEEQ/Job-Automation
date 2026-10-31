@@ -8,9 +8,16 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://applypilot:applypilot@localhost:5450/applypilot"
 
-    jwt_secret: str = "dev-secret-change-me"
+    jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
+    # Session cookie. Set COOKIE_SECURE=true whenever the site is served over HTTPS.
+    cookie_secure: bool = False
+    # Run the scheduler in this process. The API container sets this to false and a
+    # separate worker process (python -m app.worker) runs background work instead.
+    run_scheduler: bool = True
+    max_upload_mb: int = 10
+    resume_encryption_key: str = ""
 
     nvidia_api_key: str = ""
     ai_timeout_seconds: int = 60
@@ -50,6 +57,17 @@ class Settings(BaseSettings):
     # silently produce undecryptable stored passwords.
     email_encryption_key: str
     followup_interval_hours: int = 6
+
+    def assert_secure(self) -> None:
+        """Refuse to run the API or worker with a guessable signing secret."""
+        weak = {"", "dev-secret-change-me", "change-me-to-a-long-random-string", "changeme", "secret"}
+        if self.jwt_secret in weak or len(self.jwt_secret) < 32 or "change-me" in self.jwt_secret:
+            raise RuntimeError(
+                "JWT_SECRET is missing or a placeholder. Generate one with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            )
+        if not self.resume_encryption_key:
+            raise RuntimeError("RESUME_ENCRYPTION_KEY is required to store CV files encrypted")
 
     @property
     def cors_origin_list(self) -> list[str]:

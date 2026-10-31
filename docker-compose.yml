@@ -1,12 +1,15 @@
+# Production-style stack. For hot reload during development, add the dev override:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: applypilot
-      POSTGRES_PASSWORD: applypilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-applypilot}
       POSTGRES_DB: applypilot
     ports:
-      - "5450:5432"
+      # Local machine only; never expose the database on all interfaces.
+      - "127.0.0.1:5450:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -20,27 +23,42 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+psycopg://applypilot:applypilot@postgres:5432/applypilot
+      DATABASE_URL: postgresql+psycopg://applypilot:${POSTGRES_PASSWORD:-applypilot}@postgres:5432/applypilot
+      FILE_STORAGE_DIR: /app/storage/resumes
+      RUN_SCHEDULER: "false"
     ports:
       - "8010:8000"
     volumes:
-      - ./backend:/app
+      - resumes:/app/storage
     depends_on:
       postgres:
         condition: service_healthy
 
-  frontend:
-    build: ./frontend
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - ./backend/.env
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8010/api/v1
+      DATABASE_URL: postgresql+psycopg://applypilot:${POSTGRES_PASSWORD:-applypilot}@postgres:5432/applypilot
+      FILE_STORAGE_DIR: /app/storage/resumes
+    volumes:
+      - resumes:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8010/api/v1
     ports:
       - "3010:3000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
     depends_on:
       - backend
 
 volumes:
   pgdata:
+  resumes:

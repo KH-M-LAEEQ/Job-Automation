@@ -19,7 +19,11 @@ import { useAuth } from "@/providers/AuthProvider";
 const schema = z.object({
   fullName: z.string().optional(),
   email: z.string().email(),
-  password: z.string().min(8, "Password must be at least 8 characters"),
+  password: z
+    .string()
+    .min(8, "Password must be at least 8 characters")
+    .max(72, "Password must be at most 72 characters")
+    .refine((value) => /[A-Za-z]/.test(value) && /[^A-Za-z]/.test(value), "Use a mix of letters and numbers or symbols"),
 });
 
 type FormValues = z.infer<typeof schema>;

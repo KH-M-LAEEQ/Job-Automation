@@ -330,3 +330,77 @@ live tests skipped; frontend `tsc` and lint pass.
   found no employer copy (none exists or the title is too generic) and accepted no wrong page.
 
 Tests: 104 run, 102 passed, 2 opt-in live tests skipped.
+
+## Production-readiness audit fixes (31 October 2026)
+
+Branch `fix/audit-findings`. Migration `c1d2e3f4a5b6` (additive: `followups.recipient`,
+`followups.decided_at`; clamps existing follow-up cadence settings into the new bounds).
+
+- **Follow-ups need approval.** The scheduler only prepares drafts (`pending_approval`).
+  Nothing is emailed until the user approves a draft on the job page (editable subject/body).
+  Sending claims the draft atomically before the SMTP call, so retries, crashes or double
+  clicks can never send twice; a draft left in `sending` is never resent automatically.
+  One bad application no longer aborts the batch. Cadence is bounded (first 2-60 days,
+  interval 3-60 days, max 3). The model only sees summary, skills and recent role titles.
+- **Contact emails** are kept only if well-formed and literally present in the posting text.
+- **Auth.** The API and worker refuse to start with a missing/placeholder/short `JWT_SECRET`
+  (the local `.env` secret was rotated, so existing sessions must sign in again).
+  python-jose was replaced by PyJWT. Passwords need 8-72 characters with mixed character
+  types. Failed logins are rate limited (10 per account / 50 per address per 15 minutes,
+  per process). Sessions use an httpOnly SameSite=Lax cookie instead of localStorage, with
+  an `X-Requested-With` header required on cookie-authenticated writes (CSRF).
+  `POST /auth/delete-account` (password required) deletes the account and its CV files.
+- **Uploads.** 10 MB limit (413 before reading larger bodies), PDF/DOCX content sniffing,
+  zip-bomb guard, unreadable files return 422 and leave nothing on disk. CVs are stored
+  encrypted (`RESUME_ENCRYPTION_KEY`, `.enc` files); deleting a CV deletes its file.
+  `scripts/encrypt_existing_resumes.py` converts files uploaded earlier (not run yet).
+- **SMTP.** Only public hosts on ports 25/465/587/2525; the password is never sent without TLS.
+- **Dedup.** Only identical source IDs or canonical URLs merge at storage time. The
+  title/company/city fingerprint (now normalised) only marks cross-source duplicates; two
+  openings from the same board with different IDs stay separate. More tracking query
+  parameters are stripped from URLs.
+- **Matching.** Requirement detection covers "5+ yrs", "three (3) years", degree
+  requirements and more work-authorization phrasings. Experience is the sum of merged role
+  periods, not the span since the first job. A known mandatory mismatch caps the score at
+  40 in code; matched skills must appear in the job. Seniority filtering covers Sr., III+,
+  manager, architect and similar, while keeping associate/junior titles.
+- **Generic scraper** discards model-proposed postings whose title is not on the page and
+  links that are not on the page.
+- **Operations.** Background work can run as a separate worker (`python -m app.worker`;
+  `RUN_SCHEDULER=false` on the API). JSON logs, failed-run warnings, per-task status on
+  `/health`, a logged 500 handler. Production Dockerfiles (non-root, no `--reload`,
+  `next build`/`next start`), Postgres bound to 127.0.0.1, `docker-compose.dev.yml` for dev.
+  GitHub Actions CI runs pip-audit, ruff, migrations (including a downgrade/upgrade round
+  trip), all tests against Postgres 16, and frontend audit/lint/typecheck/build.
+- **Dependencies.** FastAPI 0.162 / Starlette 1.10, pypdf 6.21.4, pdfplumber 0.11.10,
+  cryptography 50.0.2, python-multipart 0.0.32 and others; pip-audit reports no known
+  vulnerabilities. Next.js 16.4.3 and zod 4.6.7; `npm audit --omit=dev` reports none.
+
+Verification: 133 backend tests (128 passed, 5 skipped: 2 opt-in live, 3 need PostgreSQL),
+frontend lint, typecheck and production build pass, migration SQL generated offline.
+PostgreSQL tests, the migration on the real database, Docker images and the UI in a
+browser were **not** run here (Docker/PostgreSQL unavailable on this machine).
+
+## Re-audit fixes (31 October 2026, later)
+
+A second, adversarial audit of the fixes above found regressions and gaps; all are fixed:
+
+- The 40-point score cap no longer fires on sentences about the employer ("over 20 years of
+  experience in fintech"); prose only counts with an applicant cue ("you", "must", "at least").
+  "Degree or equivalent experience" stays a concern but is never a hard mismatch.
+- Matched skills accept common spellings (React.js/React, JavaScript/JS, Postgres/PostgreSQL...).
+- Seniority: "staff", "lead" and "manager" only count in senior contexts (Staff Engineer, Tech Lead,
+  Engineering Manager); "Staff Accountant" and "Associate Product Manager" are kept, "Senior
+  Associate" is excluded.
+- Duplicate fingerprints only drop work-mode/contract/location tags; "(Backend)" and "(Mobile)"
+  remain different roles.
+- The scraper's title check expands abbreviations (Sr./Senior, Dev/Developer).
+- An interrupted follow-up ("sending") can be resolved by the user ("It was sent" / "It wasn't sent").
+- Failed logins are limited per client address + account and per address; nobody can lock another
+  user out. Unknown emails take the same time as wrong passwords. Set `FORWARDED_ALLOW_IPS` behind
+  a reverse proxy so limits see real client addresses.
+- Request bodies are capped while streaming, so chunked uploads can't bypass the 10 MB limit.
+- `/health` reports task timing and error counts only; error details stay in the logs.
+
+Tests: 144 run, 139 passed, 5 skipped (2 live APIs, 3 need PostgreSQL). Frontend lint, typecheck
+and build pass. Still not run here: PostgreSQL tests/migration, Docker images, CI.

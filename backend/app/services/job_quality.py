@@ -19,21 +19,82 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# Click/referral tracking that never identifies a different posting.
+_TRACKING_PARAMS = {'fbclid', 'gclid', 'msclkid', '_s.crb', 'ref', 'referrer', 'refid', 'trk', 'trackingid',
+                    'gh_src', 'lever-source', 'lever-origin', 'src', 'source', 'mc_cid', 'mc_eid'}
+
+
 def canonical_url(url: str | None) -> str | None:
     if not url:
         return None
     p = urlsplit(url)
     if p.scheme not in ('http', 'https') or not p.hostname:
         return None
-    query = [(k, v) for k, v in parse_qsl(p.query) if not k.lower().startswith('utm_') and k.lower() not in ('fbclid', 'gclid', '_s.crb')]
+    query = [(k, v) for k, v in parse_qsl(p.query) if not k.lower().startswith('utm_') and k.lower() not in _TRACKING_PARAMS]
     return urlunsplit((p.scheme.lower(), p.netloc.lower(), p.path.rstrip('/') or '/', urlencode(sorted(query)), ''))
 
 
+def _norm(value):
+    return re.sub(r'[^\w]+', ' ', value.lower()).strip()
+
+
 def fingerprint(title, company, location):
+    """Soft identity for cross-source duplicates: the title without work-mode/contract/location
+    tags, the company without legal suffixes, and the city (first segment). Brackets that name
+    a team or specialism ("(Backend)", "(Mobile)") are part of the role and are kept."""
     if not title or not company or not location:
         return None
-    text = '|'.join(re.sub(r'[^\w]+', ' ', s.lower()).strip() for s in (company, title, location))
+    city = location.split(',')[0]
+    title = re.sub(r'\(([^)]*)\)|\[([^\]]*)\]', lambda m: ' ' if _is_tag(m.group(1) or m.group(2) or '', city) else m.group(0), title)
+    title = re.sub(r'(?i)\s*[-|–,]\s*(remote|hybrid|on-?site)\s*$', '', title)
+    title = re.sub(r'(?i)\s*[-|–,]\s*' + re.escape(city.strip()) + r'\s*$', '', title) if city.strip() else title
+    company = re.sub(r'(?i)\b(inc|llc|ltd|limited|pvt|private|gmbh|corp|corporation|co)\b\.?', ' ', company)
+    text = '|'.join(_norm(s) for s in (company, title, city))
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+_TITLE_TAG = re.compile(r'(?i)^\s*(?:remote|hybrid|on-?site|in-?office|wfh|work from home|full[- ]?time|part[- ]?time|'
+                        r'contract|permanent|temporary|m/f/d|f/m/d|m/w/d|w/m/d|all genders|h/f|f/h)\s*$')
+
+
+def _is_tag(text, city):
+    """A bracketed title part that describes how/where the job is done, not which job it is."""
+    text = text.strip()
+    return bool(_TITLE_TAG.match(text)) or (bool(city.strip()) and _norm(text) in (_norm(city), _norm(city) + ' ' + 'office'))
+
+
+# Levels that are never entry-level, unless the title is explicitly a trainee/intern role.
+_SENIOR_STRONG = re.compile(r'\b(senior|sr|principal|director|head of|vp|vice president|chief)\b')
+# Words that signal seniority only in some titles: "Engineering Manager" but "Associate Product Manager";
+# "Tech Lead" / "Staff Engineer" but "Lead Generation Specialist" / "Staff Accountant".
+_SENIOR_WEAK = re.compile(r'\b(manager|architect)\b|\b(?:tech|team|technical) lead\b|\blead (?:engineer|developer|designer|'
+                          r'scientist|analyst|architect)\b|\bstaff (?:software |data |ml |machine learning |backend |frontend )?'
+                          r'(?:engineer|scientist|developer)\b|\b(iii|iv|v)\s*$')
+_ENTRY_TITLE = re.compile(r'\b(intern|internship|trainee|graduate|apprentice)\b')
+_JUNIOR_TITLE = re.compile(r'\b(associate|junior|jr|entry)\b')
+
+
+def too_senior(title):
+    title = (title or '').lower()
+    if _ENTRY_TITLE.search(title):
+        return False
+    if _SENIOR_STRONG.search(title):
+        return True
+    return bool(_SENIOR_WEAK.search(title)) and not _JUNIOR_TITLE.search(title)
+
+
+_EMAIL = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def verified_contact_email(value, text):
+    """A contact address is kept only if it is well-formed and literally present in the
+    posting text - the model must never invent or redirect where follow-ups go."""
+    if not isinstance(value, str) or not isinstance(text, str):
+        return None
+    value = value.strip()
+    if not value or not _EMAIL.match(value) or value.lower() not in text.lower():
+        return None
+    return value
 
 
 def parse_date(value):
@@ -143,10 +204,13 @@ def enrich_job(job):
                 research['state'] = 'closed'
     try:
         extraction = extract_job(job.raw_input_text[:40000])
-        for field in ('title', 'company', 'location', 'salary_range', 'employment_type', 'work_mode', 'contact_email'):
+        for field in ('title', 'company', 'location', 'salary_range', 'employment_type', 'work_mode'):
             value = getattr(extraction, field)
             if value:
                 setattr(job, field, fit_column(field, value))
+        existing = getattr(job, 'contact_email', None)
+        job.contact_email = verified_contact_email(extraction.contact_email, job.raw_input_text) or (
+            existing if verified_contact_email(existing, job.raw_input_text) else None)
         job.requirements = extraction.requirements
         job.description_text = extraction.description_summary
         research.update(extraction.model_dump(exclude_none=True, exclude={'title', 'company', 'location', 'salary_range', 'employment_type', 'work_mode', 'contact_email', 'requirements', 'description_summary'}))
@@ -312,7 +376,7 @@ def eligibility(job, preferences: dict, plan: dict | None = None, profile: dict 
     elif types and not job.employment_type:
         concerns.append('Employment type unknown')
     seniority = prefs.get('seniority', [])
-    if any(x.lower() in ('entry level', 'entry-level', 'junior', 'intern') for x in seniority) and re.search(r'\b(senior|principal|staff|director|lead)\b', (job.title or '').lower()):
+    if any(x.lower() in ('entry level', 'entry-level', 'junior', 'intern') for x in seniority) and too_senior(job.title):
         rejected.append('Seniority does not match')
     if prefs.get('work_modes') and job.work_mode and job.work_mode not in prefs['work_modes']:
         rejected.append('Work mode does not match')

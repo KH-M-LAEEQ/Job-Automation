@@ -29,5 +29,6 @@ class ApplicationRead(BaseModel):
     followup_count: int = 0
     last_followup_at: datetime | None = None
     next_followup_due_at: datetime | None = None
+    pending_followup_count: int = 0
 
     model_config = {"from_attributes": True}

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.schemas.discovery import Preferences
 
 
@@ -24,6 +24,6 @@ class ProfileUpdate(BaseModel):
     search_keywords: str | None = None
     crawl_enabled: bool | None = None
     followup_enabled: bool | None = None
-    followup_first_days: int | None = None
-    followup_interval_days: int | None = None
-    followup_max_count: int | None = None
+    followup_first_days: int | None = Field(None, ge=2, le=60)
+    followup_interval_days: int | None = Field(None, ge=3, le=60)
+    followup_max_count: int | None = Field(None, ge=0, le=3)
