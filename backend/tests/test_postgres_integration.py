@@ -33,10 +33,15 @@ class PostgresIntegrationTests(unittest.TestCase):
         self.user = User(email=f'pg-{uuid.uuid4()}@example.com', hashed_password='x', preferences={})
         self.db.add(self.user)
         self.db.commit()
+        self.user_id = self.user.id
 
     def tearDown(self):
+        # Plain DELETE: the database's ON DELETE CASCADE removes this test's jobs,
+        # applications and follow-ups (an ORM delete would race those cascades).
+        from sqlalchemy import delete
+        from app.models.user import User
         self.db.rollback()
-        self.db.delete(self.db.merge(self.user))
+        self.db.execute(delete(User).where(User.id == self.user_id))
         self.db.commit()
         self.db.close()
 
@@ -44,8 +49,13 @@ class PostgresIntegrationTests(unittest.TestCase):
         from app.services.discovery_lock import discovery_lock
         key = f'test-{uuid.uuid4()}'
         inner = []
+
+        def try_lock():
+            with discovery_lock(key) as acquired:
+                inner.append(acquired)
+
         with discovery_lock(key) as first:
-            thread = threading.Thread(target=lambda: inner.append(discovery_lock(key).__enter__()))
+            thread = threading.Thread(target=try_lock)
             thread.start()
             thread.join()
         self.assertTrue(first)
@@ -80,16 +90,25 @@ class PostgresIntegrationTests(unittest.TestCase):
                          subject='Following up', content='Hello')
         self.db.add(draft)
         self.db.commit()
+        # Plain values only: ORM objects belong to this thread's session and must not be
+        # touched (or lazily reloaded) from the worker threads.
+        application_id, draft_id = application.id, draft.id
 
         outcomes = []
+        errors = []
+        start = threading.Barrier(4)
 
         def approve():
-            with self.Session() as db:
-                app_row = db.get(Application, application.id)
-                try:
-                    outcomes.append(followup_service.approve_and_send(db, app_row, draft.id).status)
-                except followup_service.FollowUpNotPendingError:
-                    outcomes.append('refused')
+            try:
+                with self.Session() as db:
+                    app_row = db.get(Application, application_id)
+                    start.wait()  # all four approvals race for the same draft
+                    try:
+                        outcomes.append(followup_service.approve_and_send(db, app_row, draft_id).status)
+                    except followup_service.FollowUpNotPendingError:
+                        outcomes.append('refused')
+            except Exception as exc:  # surfaced in the assertion below instead of a thread traceback
+                errors.append(repr(exc))
 
         with patch.object(followup_service, 'get_email_account', return_value=MagicMock()), \
              patch.object(followup_service, 'send_email') as send:
@@ -98,6 +117,7 @@ class PostgresIntegrationTests(unittest.TestCase):
                 t.start()
             for t in threads:
                 t.join()
+        self.assertEqual(errors, [])
         self.assertEqual(send.call_count, 1)
         self.assertEqual(sorted(outcomes), ['refused', 'refused', 'refused', 'sent'])
 
