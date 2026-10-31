@@ -21,6 +21,19 @@ class GenericCompanyScrapeError(Exception):
     pass
 
 
+# Abbreviations the model often expands or contracts when it copies a title off the page.
+_TITLE_ABBREVIATIONS = {
+    "sr": "senior", "snr": "senior", "jr": "junior", "jnr": "junior", "eng": "engineer", "engr": "engineer",
+    "dev": "developer", "mgr": "manager", "assoc": "associate", "asst": "assistant", "mgmt": "management",
+    "sw": "software", "swe": "software engineer", "qa": "quality assurance", "ui": "user interface",
+}
+
+
+def _normalize(text: str) -> str:
+    words = re.findall(r"\w+", (text or "").lower())
+    return " ".join(_TITLE_ABBREVIATIONS.get(word, word) for word in words)
+
+
 def _careers_score(text: str, href: str) -> int:
     """Rank a link as a careers page; 0 means not one. A matching path or an ATS host
     beats link text alone, and policy/about/blog pages are never chosen."""
@@ -106,11 +119,21 @@ def scrape_company(name: str, homepage_url: str, limit: int = 8) -> list[dict]:
                 )
                 links = [l for l in links if l["text"]][:60]
 
-                postings = extract_company_postings(page_text, links).postings[:limit]
+                postings = extract_company_postings(page_text, links).postings
 
                 results = []
                 current_url = page.url
+                page_words = _normalize(page_text)
+                known_links = {(link.get("href") or "").rstrip("/") for link in links}
                 for posting in postings:
+                    if len(results) >= limit:
+                        break
+                    # Only keep what is really on the page: the model must not invent a role
+                    # or a link. An unknown link falls back to the listing page itself.
+                    if not posting.title or _normalize(posting.title) not in page_words:
+                        continue
+                    if posting.url and posting.url.rstrip("/") not in known_links:
+                        posting.url = None
                     description = page_text
                     job_url = posting.url or current_url
                     if posting.url and posting.url.rstrip("/") != current_url.rstrip("/"):

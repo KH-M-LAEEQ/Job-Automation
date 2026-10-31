@@ -116,14 +116,18 @@ export interface Application {
   followup_count: number;
   last_followup_at: string | null;
   next_followup_due_at: string | null;
+  pending_followup_count: number;
 }
 
 export interface FollowUp {
   id: string;
   sent_at: string;
-  status: "sent" | "failed";
+  status: "pending_approval" | "sending" | "sent" | "failed" | "discarded";
+  recipient: string | null;
   subject: string;
+  content: string;
   error: string | null;
+  decided_at: string | null;
 }
 
 export interface EmailAccount {

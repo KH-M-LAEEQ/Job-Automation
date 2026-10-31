@@ -25,6 +25,7 @@ import { Card } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { FollowUpPanel } from "@/components/jobs/FollowUpPanel";
 import { MatchPill } from "@/components/jobs/MatchPill";
 import {
   useApplicationForJob,
@@ -389,26 +390,8 @@ export default function JobDetailPage({ params }: { params: Promise<{ jobId: str
               </div>
             ))}
 
-            {isApplied && !!followups?.length && (
-              <div className="rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
-                <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                  <Send className="h-3.5 w-3.5" />
-                  Follow-up history
-                </p>
-                <ul className="space-y-2">
-                  {followups.map((f) => (
-                    <li key={f.id} className="flex items-center justify-between gap-2 text-sm">
-                      <span className="truncate text-zinc-700 dark:text-zinc-300">{f.subject}</span>
-                      <span className="flex items-center gap-2 shrink-0">
-                        <span className="text-xs text-zinc-400">
-                          {new Date(f.sent_at).toLocaleDateString()}
-                        </span>
-                        <Badge status={f.status === "sent" ? "extracted" : "failed"}>{f.status}</Badge>
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+            {isApplied && applicationId && !!followups?.length && (
+              <FollowUpPanel applicationId={applicationId} followups={followups} />
             )}
           </div>
         )}

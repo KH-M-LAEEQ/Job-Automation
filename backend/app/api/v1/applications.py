@@ -7,7 +7,15 @@ from app.api.deps import get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.schemas.application import ApplicationCreate, ApplicationRead, ApplicationUpdate
-from app.schemas.followup import FollowUpRead
+from app.schemas.followup import FollowUpApprove, FollowUpRead, FollowUpResolve
+from app.services.email_account_service import EmailAccountNotFoundError
+from app.services.followup_service import (
+    FollowUpNotFoundError,
+    FollowUpNotPendingError,
+    approve_and_send,
+    discard_followup,
+    resolve_uncertain_send,
+)
 from app.services.application_service import (
     ApplicationNotFoundError,
     DuplicateApplicationError,
@@ -79,6 +87,60 @@ def get_application_followups(
         return list_followups(db, current_user.id, application_id)
     except ApplicationNotFoundError:
         raise HTTPException(status_code=404, detail="Application not found")
+
+
+@router.post("/{application_id}/followups/{followup_id}/send", response_model=FollowUpRead)
+def send_followup(
+    application_id: uuid.UUID,
+    followup_id: uuid.UUID,
+    data: FollowUpApprove,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> FollowUpRead:
+    """Explicit user approval: the only path that emails an employer."""
+    try:
+        application = get_application(db, current_user.id, application_id)
+        return approve_and_send(db, application, followup_id, data.subject, data.content)
+    except (ApplicationNotFoundError, FollowUpNotFoundError):
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    except FollowUpNotPendingError:
+        raise HTTPException(status_code=409, detail="This follow-up is no longer awaiting approval")
+    except EmailAccountNotFoundError:
+        raise HTTPException(status_code=400, detail="Connect an email account before sending")
+
+
+@router.post("/{application_id}/followups/{followup_id}/discard", response_model=FollowUpRead)
+def discard(
+    application_id: uuid.UUID,
+    followup_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> FollowUpRead:
+    try:
+        application = get_application(db, current_user.id, application_id)
+        return discard_followup(db, application, followup_id)
+    except (ApplicationNotFoundError, FollowUpNotFoundError):
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    except FollowUpNotPendingError:
+        raise HTTPException(status_code=409, detail="This follow-up is no longer awaiting approval")
+
+
+@router.post("/{application_id}/followups/{followup_id}/resolve", response_model=FollowUpRead)
+def resolve(
+    application_id: uuid.UUID,
+    followup_id: uuid.UUID,
+    data: FollowUpResolve,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> FollowUpRead:
+    """Record whether an interrupted send went out, after the user checks their Sent folder."""
+    try:
+        application = get_application(db, current_user.id, application_id)
+        return resolve_uncertain_send(db, application, followup_id, data.sent)
+    except (ApplicationNotFoundError, FollowUpNotFoundError):
+        raise HTTPException(status_code=404, detail="Follow-up not found")
+    except FollowUpNotPendingError:
+        raise HTTPException(status_code=409, detail="This follow-up is not awaiting confirmation")
 
 
 @router.delete("/{application_id}", status_code=status.HTTP_204_NO_CONTENT)

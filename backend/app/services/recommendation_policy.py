@@ -58,10 +58,22 @@ _NUMBER_WORDS = {
     'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12,
     'thirteen': 13, 'fourteen': 14, 'fifteen': 15, 'twenty': 20,
 }
+_NUMBER = r'(?:\d+|' + '|'.join(_NUMBER_WORDS) + r')'
+# "5 years of experience", "5+ yrs experience in", "three (3) years' professional software
+# experience", "minimum 2-4 years relevant experience". Group 1 is the minimum.
 _YEARS_PATTERN = re.compile(
-    r'(?i)(\d+|' + '|'.join(_NUMBER_WORDS) + r')\s*(?:\+|[-–]\s*(?:\d+|' + '|'.join(_NUMBER_WORDS) + r'))?'
-    r'\s*years?\s+(?:of\s+)?(?:professional\s+|relevant\s+|work\s+)?experience'
+    r'(?i)\b(' + _NUMBER + r')(?:\s*\(\d+\))?\s*(?:\+|plus)?\s*(?:(?:[-–]|to)\s*' + _NUMBER + r'\s*)?'
+    r'\s*(?:years?|yrs?)\.?[\'’]?\s+(?:of\s+)?(?:[\w/-]+\s+){0,3}?experience'
 )
+_AUTHORIZATION = re.compile(
+    r'(?i)(work authori[sz]ation|right to work|citizenship|security clearance|must be (?:a )?citizen'
+    r'|eligible to work|authori[sz]ed to work|legally (?:able|entitled|permitted) to work|work permit'
+    r'|green card|visa sponsorship (?:is )?(?:not|un)available|(?:no|not able to|cannot|unable to) (?:provide |offer )?(?:visa )?sponsor)'
+)
+_DEGREE_LEVELS = (('doctorate', r'ph\.?\s?d|doctorate|doctoral'), ('master', r"master'?s?|\bm\.?s\.?c?\b|\bmba\b"),
+                  ('bachelor', r"bachelor'?s?|\bb\.?s\.?c?\b|\bb\.?e\b|\bb\.?tech\b|undergraduate degree"))
+_DEGREE_RANK = {'bachelor': 1, 'master': 2, 'doctorate': 3}
+_MONTHS = {m: i + 1 for i, m in enumerate(('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'))}
 
 
 def _years_value(token):
@@ -69,49 +81,140 @@ def _years_value(token):
     return _NUMBER_WORDS.get(token, None) if not token.isdigit() else int(token)
 
 
+def _month_index(value, *, end=False):
+    """'2024-03', 'Mar 2024', '03/2024' or '2024' -> months since year 0; None if unparseable.
+    A bare year counts from January for a start and through December for an end."""
+    text = str(value or '').lower()
+    year = re.search(r'(19|20)\d{2}', text)
+    if not year:
+        return None
+    month = None
+    numeric = re.search(r'(?:(19|20)\d{2}[-/.](\d{1,2})\b|\b(\d{1,2})[-/.](19|20)\d{2})', text)
+    if numeric:
+        month = int(numeric.group(2) or numeric.group(3))
+    else:
+        named = re.search(r'\b(' + '|'.join(_MONTHS) + r')[a-z]*\b', text)
+        if named:
+            month = _MONTHS[named.group(1)]
+    if month is None or not 1 <= month <= 12:
+        month = 12 if end else 1
+    return int(year.group(0)) * 12 + month - 1
+
+
 def candidate_experience_years(profile):
-    """Best-effort total career span (earliest start to latest end/'present') from the
-    resume's own stated experience. Returns None when nothing parseable is present -
-    callers must treat that as unknown, never as zero."""
+    """Total experience in whole years from the CV's dated roles, with overlapping roles
+    merged and gaps excluded (an old internship does not stretch the total to today).
+    Returns None when nothing parseable is present - callers treat that as unknown."""
     entries = (profile or {}).get('experience') or []
-    starts, ends = [], []
-    now_year = datetime.now(timezone.utc).year
+    now = datetime.now(timezone.utc)
+    now_index = now.year * 12 + now.month - 1
+    spans = []
     for entry in entries:
         entry = entry if isinstance(entry, dict) else {}
-        start_match = re.search(r'(19|20)\d{2}', str(entry.get('start_date') or ''))
-        if start_match:
-            starts.append(int(start_match.group(0)))
+        start = _month_index(entry.get('start_date'))
+        if start is None:
+            continue
         end_raw = str(entry.get('end_date') or '')
-        end_match = re.search(r'(19|20)\d{2}', end_raw)
-        if end_match:
-            ends.append(int(end_match.group(0)))
-        elif not entry.get('end_date') or re.search(r'(?i)present|current|ongoing|now', end_raw):
-            ends.append(now_year)
-    if not starts:
+        if not entry.get('end_date') or re.search(r'(?i)present|current|ongoing|now', end_raw):
+            end = now_index
+        else:
+            end = _month_index(end_raw, end=True)
+            if end is None:
+                continue
+        if end >= start:
+            spans.append((start, min(end, now_index) + 1))
+    if not spans:
         return None
-    return max(0, (max(ends) if ends else now_year) - min(starts))
+    total, current_start, current_end = 0, None, None
+    for start, end in sorted(spans):
+        if current_end is None or start > current_end:
+            if current_end is not None:
+                total += current_end - current_start
+            current_start, current_end = start, end
+        else:
+            current_end = max(current_end, end)
+    total += current_end - current_start
+    return total // 12
+
+
+def _degree_level(text, lowest=False):
+    """Highest degree level named in text ('BS/MS required' asks for the lowest instead)."""
+    found = [level for level, pattern in _DEGREE_LEVELS if re.search(r'(?i)' + pattern, text)]
+    if not found:
+        return None
+    return (min if lowest else max)(found, key=_DEGREE_RANK.get)
+
+
+def known_mismatches(job, profile):
+    """Mandatory requirements the CV clearly does not meet (as opposed to unknowns)."""
+    mismatches = []
+    required_years, degree, degree_flexible = _requirement_facts(job)
+    actual = candidate_experience_years(profile)
+    if required_years and actual is not None and actual < required_years:
+        mismatches.append(f'Requires {required_years}+ years of experience; CV shows about {actual}')
+    education = (profile or {}).get('education') or []
+    # "Master's degree or equivalent experience" can be met without the degree: a concern, not a mismatch.
+    if degree and education and not degree_flexible:
+        held = [_degree_level(' '.join(str(v) for v in (e.values() if isinstance(e, dict) else [e]))) for e in education]
+        best = max((_DEGREE_RANK[h] for h in held if h), default=0)
+        if best and best < _DEGREE_RANK[degree]:
+            mismatches.append(f'Requires a {degree} degree; CV lists a lower degree')
+    return mismatches
+
+
+_OPTIONAL = re.compile(r'(?i)preferred|desirable|nice.to.have|not required|no .* required'
+                       r'|\bis an? (?:plus|bonus|advantage)\b|\badvantageous\b|\bideal(?:ly)?\b|\bnice if\b|\bbenefit\b')
+# Sentences about the employer ("Acme has over 20 years of experience in fintech").
+_ABOUT_EMPLOYER = re.compile(r'(?i)^\s*(?:we|our|the company)\b|\b(?:we have|we\'ve|our (?:team|company|firm)|'
+                             r'company (?:has|with)|founded|since \d{4}|in business|track record|industry leader|'
+                             r'(?:company|firm|house|agency|organi[sz]ation|business|we|it) (?:has|with|brings) '
+                             r'(?:over|more than|nearly|almost)\s+\w+\s+years)\b')
+# Prose sentences only count as requirements with an explicit cue aimed at the applicant.
+_APPLICANT_CUE = re.compile(r'(?i)\b(?:you|your|candidate|applicant|required|requires|requirement|must|minimum|'
+                            r'at least|looking for|seeking|should have|need|qualifications?)\b')
+
+
+def _mandatory_clauses(job, *, with_source=False):
+    """Mandatory-looking clauses: extracted requirements, plus prose sentences as a fallback."""
+    requirements = getattr(job, 'requirements', None) or []
+    prose = re.split(r'[\n.;]', getattr(job, 'raw_input_text', '') or '')
+    for clause, listed in [(c, True) for c in requirements] + [(c, False) for c in prose]:
+        if not clause or _OPTIONAL.search(clause):
+            continue
+        yield (clause, listed) if with_source else clause
+
+
+def _requirement_facts(job):
+    """(minimum years, required degree level, whether the degree accepts equivalent experience)."""
+    minima, degree, flexible = [], None, False
+    for clause, listed in _mandatory_clauses(job, with_source=True):
+        about_employer = bool(_ABOUT_EMPLOYER.search(clause))
+        years = _YEARS_PATTERN.search(clause)
+        if years and not about_employer and (listed or _APPLICANT_CUE.search(clause)):
+            value = _years_value(years.group(1))
+            if value is not None:
+                minima.append(value)
+        if not about_employer and re.search(r'(?i)\b(required|requires|must|minimum|at least)\b', clause):
+            level = _degree_level(clause, lowest=True) if re.search(r'(?i)degree|bachelor|master|ph\.?\s?d|doctorate', clause) else None
+            if level and (degree is None or _DEGREE_RANK[level] > _DEGREE_RANK[degree]):
+                degree = level
+                flexible = bool(re.search(r'(?i)\bor (?:an? )?(?:equivalent|related|comparable|relevant)\b|\bequivalent (?:practical |work )?experience\b', clause))
+    return (max(minima) if minima else 0), degree, flexible
 
 
 def mandatory_evidence(job, profile=None):
     """Fail uncertain mandatory conditions closed. Never infer dates, enrollment or visas."""
     rejected, concerns = [], []
-    requirements = getattr(job, 'requirements', None) or []
-    # Keep raw clauses as a fallback for missing extracted requirements.
-    clauses = requirements + re.split(r'[\n.;]', getattr(job, 'raw_input_text', '') or '')
-    minima = []
     enrollment = authorization = False
-    for clause in clauses:
-        if re.search(r'(?i)preferred|desirable|nice.to.have|not required|no .* required'
-                     r'|\bis an? (?:plus|bonus|advantage)\b|\badvantageous\b|\bideal(?:ly)?\b|\bnice if\b|\bbenefit\b', clause):
-            continue
-        years = _YEARS_PATTERN.search(clause)
-        if years:
-            value = _years_value(years.group(1))
-            if value is not None:
-                minima.append(value)
+    for clause in _mandatory_clauses(job):
         enrollment |= bool(re.search(r'(?i)(currently (?:enrolled|studying)|must be (?:a )?student|enrollment required)', clause))
-        authorization |= bool(re.search(r'(?i)(work authori[sz]ation|right to work|citizenship|security clearance|must be (?:a )?citizen)', clause))
-    required_years = max(minima) if minima else 0
+        authorization |= bool(_AUTHORIZATION.search(clause))
+    required_years, degree, _ = _requirement_facts(job)
+    if degree:
+        held = [_degree_level(' '.join(str(v) for v in (e.values() if isinstance(e, dict) else [e])))
+                for e in (profile or {}).get('education', [])]
+        if max((_DEGREE_RANK[h] for h in held if h), default=0) < _DEGREE_RANK[degree]:
+            concerns.append(f'Confirm the required {degree} degree from CV evidence')
     if required_years > 0:
         # A posting that only ever mentions "0" or "0-N years" (e.g. "0-2 years, fresh
         # graduates welcome") isn't a minimum anyone could fail to meet.

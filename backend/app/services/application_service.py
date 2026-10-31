@@ -21,23 +21,23 @@ class DuplicateApplicationError(Exception):
 
 def _annotate_followup_fields(db: Session, application: Application) -> Application:
     """Populates computed, non-DB fields (followup_count, last_followup_at,
-    next_followup_due_at) that ApplicationRead exposes to the frontend - kept as
-    ad-hoc attributes derived from FollowUp rows + the user's cadence settings rather
-    than denormalized columns, so there's a single source of truth for what's been sent."""
-    followups = sorted(application.followups, key=lambda f: f.sent_at)
-    application.followup_count = len(followups)
-    application.last_followup_at = followups[-1].sent_at if followups else None
+    next_followup_due_at, pending_followup_count) that ApplicationRead exposes to the
+    frontend - derived from FollowUp rows + the user's cadence settings rather than
+    denormalized columns, so there's a single source of truth for what's been sent."""
+    from app.services.followup_service import followup_anchor, has_open_draft, slots_used
+
+    sent = sorted((f for f in application.followups if f.status == "sent"), key=lambda f: f.sent_at)
+    application.followup_count = len(sent)
+    application.last_followup_at = sent[-1].sent_at if sent else None
+    application.pending_followup_count = sum(1 for f in application.followups if f.status == "pending_approval")
 
     next_due = None
-    if application.status == "applied" and not application.followup_opt_out:
+    if application.status == "applied" and not application.followup_opt_out and not has_open_draft(application):
         user = db.get(User, application.user_id)
-        if user is not None and user.followup_enabled and len(followups) < user.followup_max_count:
-            if not followups:
-                anchor = application.applied_at
-                days = user.followup_first_days
-            else:
-                anchor = followups[-1].sent_at
-                days = user.followup_interval_days
+        used = slots_used(application)
+        if user is not None and user.followup_enabled and used < user.followup_max_count:
+            anchor = followup_anchor(application)
+            days = user.followup_interval_days if used else user.followup_first_days
             if anchor is not None:
                 next_due = anchor + timedelta(days=days)
     application.next_followup_due_at = next_due

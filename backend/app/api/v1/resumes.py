@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.resume import ResumeRead, ResumeUpdate
 from app.services.resume_service import (
+    ResumeFileError,
     ResumeNotFoundError,
     delete_resume,
     get_resume,
@@ -26,9 +27,10 @@ def create_resume(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ResumeRead:
-    if not (file.filename or "").lower().endswith((".pdf", ".docx")):
-        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported")
-    return upload_resume(db, current_user.id, file)
+    try:
+        return upload_resume(db, current_user.id, file)
+    except ResumeFileError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @router.get("", response_model=list[ResumeRead])

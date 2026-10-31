@@ -2,6 +2,7 @@
 
 import { Mail, MapPin, RadioTower, Save, Search, Send } from "lucide-react";
 import { useState } from "react";
+import { DeleteAccount } from "@/components/dashboard/DeleteAccount";
 import { DiscoveryPreferences } from "@/components/dashboard/DiscoveryPreferences";
 
 import { Badge } from "@/components/ui/badge";
@@ -317,30 +318,33 @@ function SettingsForm({ profile, emailAccount }: { profile: Profile; emailAccoun
               onChange={(e) => setFollowupEnabled(e.target.checked)}
               className="h-4 w-4 rounded border-zinc-300 text-brand focus:ring-brand/30 dark:border-zinc-700"
             />
-            Automatically send follow-up emails on applications gone quiet
+            Draft follow-up emails for applications gone quiet
           </label>
 
           <div className="grid grid-cols-3 gap-3">
-            <Field label="First follow-up after (days)">
+            <Field label="First follow-up after (days, 2-60)">
               <Input
                 type="number"
-                min={0}
+                min={2}
+                max={60}
                 value={followupFirstDays}
                 onChange={(e) => setFollowupFirstDays(Number(e.target.value))}
               />
             </Field>
-            <Field label="Days between follow-ups">
+            <Field label="Days between follow-ups (3-60)">
               <Input
                 type="number"
-                min={0}
+                min={3}
+                max={60}
                 value={followupIntervalDays}
                 onChange={(e) => setFollowupIntervalDays(Number(e.target.value))}
               />
             </Field>
-            <Field label="Max follow-ups per application">
+            <Field label="Max follow-ups per application (0-3)">
               <Input
                 type="number"
                 min={0}
+                max={3}
                 value={followupMaxCount}
                 onChange={(e) => setFollowupMaxCount(Number(e.target.value))}
               />
@@ -348,10 +352,9 @@ function SettingsForm({ profile, emailAccount }: { profile: Profile; emailAccoun
           </div>
 
           <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
-            Follow-ups send automatically with no review step. Only applications where a
-            contact email was found on the posting are eligible - many crawled postings won&apos;t
-            have one. ApplyPilot cannot detect if the recruiter already replied, so the
-            max-follow-ups cap above is the only real safeguard against over-following-up.
+            ApplyPilot only prepares drafts. Nothing is emailed until you review a draft on the job
+            page and approve it. Only applications whose posting lists a contact email are eligible.
+            ApplyPilot cannot detect whether the recruiter already replied, so check before approving.
           </p>
 
           {followupError && (
@@ -403,6 +406,8 @@ function SettingsForm({ profile, emailAccount }: { profile: Profile; emailAccoun
           </ul>
         </Card>
       )}
+
+      <DeleteAccount />
     </div>
   );
 }

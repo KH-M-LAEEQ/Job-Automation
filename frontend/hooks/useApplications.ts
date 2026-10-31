@@ -66,3 +66,42 @@ export function useApplicationFollowups(applicationId: string | null) {
     enabled: !!applicationId,
   });
 }
+
+export function useSendFollowup(applicationId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, subject, content }: { id: string; subject: string; content: string }) =>
+      apiFetch<FollowUp>(`/applications/${applicationId}/followups/${id}/send`, {
+        method: "POST",
+        body: JSON.stringify({ subject, content }),
+      }),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["applications"] });
+    },
+  });
+}
+
+export function useResolveFollowup(applicationId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, sent }: { id: string; sent: boolean }) =>
+      apiFetch<FollowUp>(`/applications/${applicationId}/followups/${id}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ sent }),
+      }),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["applications"] });
+    },
+  });
+}
+
+export function useDiscardFollowup(applicationId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiFetch<FollowUp>(`/applications/${applicationId}/followups/${id}/discard`, { method: "POST" }),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["applications"] });
+    },
+  });
+}

@@ -14,7 +14,8 @@ structured vacancy enrichment, matching, and optional opportunity notifications.
 Preserve existing `.env` files, JWT secrets, encryption keys, and database volumes.
 For a new installation, copy the example environment files and configure them first.
 NVIDIA credentials enable AI extraction and matching; Tavily enables general web
-search. An email encryption key is required by the backend configuration.
+search. The backend refuses to start without a random `JWT_SECRET` (32+ characters,
+not the example placeholder), `EMAIL_ENCRYPTION_KEY` and `RESUME_ENCRYPTION_KEY`.
 
 From the project directory, start the database:
 
@@ -30,8 +31,15 @@ python -m venv venv
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
 .\venv\Scripts\python.exe -m playwright install chromium
 .\venv\Scripts\python.exe -m alembic upgrade head
+# One-off, after backing up storage\resumes and the database: encrypt CVs uploaded earlier.
+.\venv\Scripts\python.exe -m scripts.encrypt_existing_resumes
 .\venv\Scripts\python.exe -m uvicorn app.main:app --port 8010
 ```
+
+With `RUN_SCHEDULER=true` (the default) the API process also runs background work. To
+run it separately, set `RUN_SCHEDULER=false` for the API and start
+`.\venv\Scripts\python.exe -m app.worker`. `docker compose up` does this automatically
+(`backend` + `worker` services; add `-f docker-compose.dev.yml` for reloading dev servers).
 
 From `frontend`:
 
@@ -45,12 +53,16 @@ Set backend `CORS_ORIGINS=http://localhost:3010` and frontend
 Backend API documentation: http://localhost:8010/docs
 Frontend: http://localhost:3010
 
-The additive discovery migration is `b7c8d9e0f123`. See `UPGRADE.md` for the
-implementation, verification results, and deployment limitations. Starting the
-backend also starts scheduled work, including existing opted-in email follow-ups.
+The latest migration is `c1d2e3f4a5b6` (follow-up approval). See `UPGRADE.md` for the
+implementation, verification results, and deployment limitations.
+
+Employer follow-ups are never sent automatically: the scheduler prepares drafts, and each
+one is emailed only after you review and approve it on the job page.
 
 ## Checks
 
 From `backend`: `.\venv\Scripts\python.exe -m unittest discover -s tests -q`.
-From `frontend`: `npm run lint`, `npx tsc --noEmit`, and `npm run build`.
+From `frontend`: `npm run lint`, `npm run typecheck`, and `npm run build`.
 Live and paid integration tests are opt-in; ordinary tests mock external services.
+PostgreSQL integration tests run when `TEST_DATABASE_URL` equals `DATABASE_URL` (a disposable,
+migrated database). CI (`.github/workflows/ci.yml`) runs everything against Postgres 16.

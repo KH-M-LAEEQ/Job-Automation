@@ -35,5 +35,5 @@ class PreservationTests(unittest.TestCase):
 
     def test_no_followup_without_email_account(self):
         with patch.object(followup_service, 'get_email_account', return_value=None), patch.object(followup_service, 'send_email') as send:
-            self.assertEqual(followup_service.run_followups_for_user(MagicMock(), MagicMock()), [])
+            self.assertEqual(followup_service.draft_followups_for_user(MagicMock(), MagicMock()), [])
             send.assert_not_called()

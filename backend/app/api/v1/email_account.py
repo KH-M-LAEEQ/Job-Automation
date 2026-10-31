@@ -7,6 +7,7 @@ from app.models.user import User
 from app.schemas.email_account import EmailAccountCreate, EmailAccountRead, EmailTestResult
 from app.services.email_account_service import (
     EmailAccountNotFoundError,
+    InvalidEmailAccountError,
     delete_email_account,
     get_email_account,
     send_test_email,
@@ -32,7 +33,10 @@ def save_email_account(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> EmailAccountRead:
-    return upsert_email_account(db, current_user.id, data)
+    try:
+        return upsert_email_account(db, current_user.id, data)
+    except InvalidEmailAccountError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
